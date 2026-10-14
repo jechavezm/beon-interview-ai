@@ -1,11 +1,14 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
 
+import httpx
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
+from ollama import ResponseError
 
 import main
 
@@ -34,7 +37,49 @@ def fake_llm(content, captured_prompts=None):
     return RunnableLambda(respond)
 
 
+def failing_llm(error):
+    async def respond(prompt_value):
+        raise error
+
+    return RunnableLambda(respond)
+
+
+class ProviderTests(unittest.TestCase):
+    def test_ollama_uses_configured_model_and_native_structured_output(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OLLAMA_MODEL": "test-local-model",
+                "OLLAMA_BASE_URL": "http://localhost:11434",
+            },
+            clear=True,
+        ), patch("main.ChatOllama") as chat_ollama:
+            result = main.get_llm("ollama")
+
+        self.assertIs(result, chat_ollama.return_value)
+        chat_ollama.assert_called_once_with(
+            model="test-local-model",
+            base_url="http://localhost:11434",
+            temperature=0,
+            format=main.AIOutputPrompt.model_json_schema(),
+            client_kwargs={"timeout": 120},
+        )
+
+
 class GenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_code_example_preserves_indentation_and_trailing_newline(self):
+        code = "    return await chain.ainvoke({'question': question})\n"
+        output = {
+            **VALID_OUTPUT,
+            "code_examples": [{**VALID_OUTPUT["code_examples"][0], "code": code}],
+        }
+        with patch("main.get_llm", return_value=fake_llm(json.dumps(output))):
+            result = await main.generate_ai_response(
+                main.AIRequest(question="Show the body of an async helper.")
+            )
+
+        self.assertEqual(result.response.code_examples[0].code, code)
+
     async def test_structured_response_for_each_provider(self):
         for provider in ("ollama", "claude", "openai"):
             with self.subTest(provider=provider):
@@ -81,6 +126,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             "wrong field type": {**VALID_OUTPUT, "steps": "Create a prompt template."},
             "unexpected field": {**VALID_OUTPUT, "unsupported_field": "extra"},
             "empty answer": {**VALID_OUTPUT, "answer": ""},
+            "whitespace-only answer": {**VALID_OUTPUT, "answer": " \n\t "},
             "missing code field": {
                 **VALID_OUTPUT,
                 "code_examples": [{"language": "python", "explanation": "Example"}],
@@ -109,6 +155,78 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class APITests(unittest.TestCase):
+    def test_question_and_legacy_prompt_return_structured_output(self):
+        for request_field in ("question", "prompt"):
+            with self.subTest(request_field=request_field):
+                with patch(
+                    "main.get_llm", return_value=fake_llm(json.dumps(VALID_OUTPUT))
+                ) as get_llm:
+                    with TestClient(main.app) as client:
+                        response = client.post(
+                            "/api/v1/generate", json={request_field: "Explain LCEL"}
+                        )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "response": VALID_OUTPUT,
+                        "provider_used": "ollama",
+                        "status": "success",
+                    },
+                )
+                get_llm.assert_called_once_with("ollama")
+
+    def test_invalid_question_returns_422_before_generation(self):
+        invalid_requests = ({}, {"question": ""}, {"question": " \n\t "}, {"question": 42})
+        for payload in invalid_requests:
+            with self.subTest(payload=payload):
+                with patch("main.get_llm") as get_llm:
+                    with TestClient(main.app) as client:
+                        response = client.post("/api/v1/generate", json=payload)
+
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["detail"][0]["loc"], ["body", "question"])
+                get_llm.assert_not_called()
+
+    def test_invalid_model_json_returns_502_over_http(self):
+        invalid_outputs = {
+            "malformed": "not JSON",
+            "truncated": json.dumps(VALID_OUTPUT)[:-1],
+            "whitespace-only answer": json.dumps({**VALID_OUTPUT, "answer": " \n\t "}),
+        }
+        for case, content in invalid_outputs.items():
+            with self.subTest(case=case):
+                with patch("main.get_llm", return_value=fake_llm(content)):
+                    with TestClient(main.app) as client:
+                        response = client.post(
+                            "/api/v1/generate", json={"question": "Explain LCEL"}
+                        )
+
+                self.assertEqual(response.status_code, 502)
+                self.assertIsInstance(response.json()["detail"], str)
+
+    def test_provider_failures_return_safe_http_errors(self):
+        private_error_text = "upstream failure includes token=secret-test-token"
+        errors = (
+            (httpx.ConnectError(private_error_text), 503),
+            (httpx.ReadTimeout(private_error_text), 504),
+            (ResponseError(private_error_text, status_code=404), 502),
+        )
+        for error, expected_status in errors:
+            with self.subTest(error=type(error).__name__):
+                with patch("main.get_llm", return_value=failing_llm(error)):
+                    with TestClient(main.app) as client:
+                        response = client.post(
+                            "/api/v1/generate", json={"question": "Explain LCEL"}
+                        )
+
+                self.assertEqual(response.status_code, expected_status)
+                detail = response.json()["detail"]
+                self.assertIsInstance(detail, str)
+                self.assertNotIn(private_error_text, detail)
+                self.assertNotIn("secret-test-token", detail)
+
     def test_echo_succeeds_without_model_or_configuration_access(self):
         payload = {"message": "Interview setup ready."}
         with patch("main.get_llm") as get_llm, patch("main._required_env") as required_env:
@@ -149,6 +267,7 @@ class APITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         schemas = response.json()["components"]["schemas"]
+        self.assertIn("question", schemas["AIRequest"]["properties"])
         self.assertEqual(
             schemas["AIResponse"]["properties"]["response"]["$ref"],
             "#/components/schemas/AIOutputPrompt",

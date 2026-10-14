@@ -1,8 +1,8 @@
 # BEON Interview AI
 
-A Python/FastAPI starter for a one-hour FDE AI interview exercise. A simple POST
-endpoint works locally without an AI service. An optional LangChain endpoint
-uses Ollama, Claude, or OpenAI and validates model output with Pydantic.
+A Python/FastAPI app with a LangChain question endpoint that connects to a local
+Ollama server and returns JSON validated by Pydantic. Claude and OpenAI are also
+available through the existing provider contract.
 
 ## Run locally
 
@@ -35,27 +35,47 @@ curl -X POST http://127.0.0.1:8000/api/v1/echo \
 This endpoint requires no credentials, model downloads, or external services.
 It is a starting point to adapt after the interviewer explains the exercise.
 
-## Optional AI endpoint
+## Ask a question with Ollama
 
-Copy `.env.example` to `.env` and configure only the provider you intend to use.
-For Ollama, select a model already installed locally and start the Ollama server.
-Claude requires `ANTHROPIC_API_KEY`; `ANTHROPIC_MODEL` defaults to
-`claude-haiku-5-5`. OpenAI requires `OPENAI_API_KEY`.
+Set these values in `.env` in the repository root (existing shell environment
+variables take precedence):
 
-The AI prompt covers LangChain concepts, implementation, debugging, RAG, tools,
-agents, and version compatibility.
+```dotenv
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.2:3b
+```
 
-Send a request to `POST /api/v1/generate`:
+`OLLAMA_MODEL` is required. `OLLAMA_BASE_URL` defaults to
+`http://localhost:11434`. Select a model installed on your Ollama server. If
+needed, download it and start the server in a separate terminal:
+
+```bash
+ollama pull llama3.2:3b
+ollama serve
+```
+
+If the Ollama desktop app already runs the server, skip `ollama serve`.
+
+Start FastAPI using the commands above, then send any question to
+`POST /api/v1/generate`:
 
 ```json
 {
-  "prompt": "What is LCEL in LangChain?",
-  "provider": "ollama"
+  "question": "What is LCEL in LangChain?"
 }
 ```
 
-`provider` defaults to `ollama`; `claude` and `openai` are also supported.
-The response now contains a structured object:
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/generate \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is LCEL in LangChain?"}'
+```
+
+`provider` defaults to `ollama`. The legacy field `prompt` is also accepted in
+place of `question`; send exactly one of these fields. Missing, empty, or
+whitespace-only questions return HTTP 422.
+
+The response contains a structured object, not an encoded JSON string:
 
 ```json
 {
@@ -71,11 +91,28 @@ The response now contains a structured object:
 ```
 
 Each code example contains `language`, `code`, and `explanation`. All output fields
-are required; lists may be empty. Unexpected output fields are rejected. Invalid
-model output returns HTTP 502.
+are required; lists may be empty. Ollama receives the output's JSON schema through
+LangChain's `ChatOllama(format=...)`, and the complete JSON response is validated
+before returning it. Unexpected output fields and malformed or truncated JSON
+are rejected.
 
-Clients that previously consumed `response` as a string should use
-`response.answer` and the additional structured fields.
+| HTTP status | Meaning |
+| --- | --- |
+| 400 | Missing or invalid provider configuration |
+| 422 | Invalid request body |
+| 502 | Provider error or invalid structured model output |
+| 503 | AI service is unreachable |
+| 504 | AI request timed out (120-second limit) |
+
+Model calls use `ainvoke` so they do not block FastAPI's event loop. `/echo` and
+the API docs work without model configuration or a running Ollama server.
+
+## Other providers
+
+Set `provider` to `claude` or `openai` in the same request. Claude requires both
+`ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`; OpenAI requires both `OPENAI_API_KEY`
+and `OPENAI_MODEL`. These providers use the same JSON instructions and output
+validation. Only the selected provider is initialized.
 
 ## Tests
 
