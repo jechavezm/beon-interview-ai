@@ -1,0 +1,23 @@
+[project]
+name = "beon-interview-ai"
+version = "0.1.0"
+description = "A Python/FastAPI starter for FDE AI interviews with a simple POST endpoint and optional LangChain integrations."
+readme = "README.md"
+authors = [
+    { name = "JuanMarmol", email = "jechavezm@outlook.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.143.0",
+    "langchain-anthropic>=1.7.6",
+    "langchain-core>=1.6.10",
+    "langchain-ollama>=1.1.0",
+    "langchain-openai>=1.7.1",
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
