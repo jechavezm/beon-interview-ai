@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 import uvicorn
@@ -141,13 +141,21 @@ def get_llm(provider: str):
 
     raise ValueError(f"Unsupported provider: {provider}. Supported providers are: ollama, claude, openai.")
 
-# --- baseline ENDPOINT ---
-@app.post("/api/v1/echo", response_model=EchoPayload)
+# Create the route base
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["AI Forward Deployed API"],
+    responses={404: {"description": "Not found"}},
+)
+app.include_router(router)
+
+# --- Echo Endpoint ---
+@router.post("/echo", response_model=EchoPayload)
 async def echo(payload: EchoPayload) -> EchoPayload:
     return payload
 
-# --- main ENDPOINT ---
-@app.post("/api/v1/generate", response_model=AIResponse)
+# --- AI Response Generation Endpoint ---
+@router.post("/generate", response_model=AIResponse)
 async def generate_ai_response(request: AIRequest) -> AIResponse:
     try:
         # 1. init selected LLM
